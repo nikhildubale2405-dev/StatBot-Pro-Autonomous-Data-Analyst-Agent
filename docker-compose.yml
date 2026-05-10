@@ -1,0 +1,63 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    image: statbot-backend:latest
+    container_name: statbot-pro-backend
+    environment:
+      APP_NAME: StatBot Pro
+      DATABASE_URL: sqlite:////app/data/db/statbot.db
+      DATA_DIR: /app/data
+      ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      MAX_AGENT_RETRIES: ${MAX_AGENT_RETRIES:-2}
+      SANDBOX_IMAGE: statbot-sandbox:latest
+      SANDBOX_MODE: volume
+      SANDBOX_UPLOADS_VOLUME: statbot_uploads
+      SANDBOX_OUTPUTS_VOLUME: statbot_outputs
+      SANDBOX_MEMORY_LIMIT: ${SANDBOX_MEMORY_LIMIT:-512m}
+      SANDBOX_NANO_CPUS: ${SANDBOX_NANO_CPUS:-1000000000}
+      SANDBOX_TIMEOUT_SECONDS: ${SANDBOX_TIMEOUT_SECONDS:-25}
+    ports:
+      - "8000:8000"
+    volumes:
+      - statbot_uploads:/app/data/uploads
+      - statbot_outputs:/app/data/outputs
+      - statbot_db:/app/data/db
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - sandbox
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: http://localhost:8000
+    image: statbot-frontend:latest
+    container_name: statbot-pro-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+  sandbox:
+    build:
+      context: ./sandbox
+    image: statbot-sandbox:latest
+    container_name: statbot-pro-sandbox-image
+    command: ["python", "-c", "import time; time.sleep(10**9)"]
+    network_mode: "none"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  statbot_uploads:
+    name: statbot_uploads
+  statbot_outputs:
+    name: statbot_outputs
+  statbot_db:
+    name: statbot_db
