@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import Column, JSON
+from sqlalchemy import Column, JSON, String
 from sqlmodel import Field, SQLModel
 
 
@@ -16,9 +16,18 @@ def utc_now() -> datetime:
 
 class UserSession(SQLModel, table=True):
     id: str = Field(default_factory=new_id, primary_key=True)
+    user_id: str | None = Field(default=None, index=True)
     title: str = "Untitled analysis"
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class User(SQLModel, table=True):
+    id: str = Field(default_factory=new_id, primary_key=True)
+    email: str = Field(sa_column=Column(String, unique=True, index=True, nullable=False))
+    name: str
+    password_hash: str
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class UploadedFile(SQLModel, table=True):

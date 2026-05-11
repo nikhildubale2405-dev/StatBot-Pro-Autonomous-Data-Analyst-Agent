@@ -240,9 +240,7 @@ class AgentService:
             return f"QUESTION = {question!r}\n{FALLBACK_COMPARE_CODE}"
         if any(word in q for word in ["plot", "chart", "trend", "graph", "visual"]):
             return f"QUESTION = {question!r}\n{FALLBACK_CHART_CODE}"
-        if any(word in q for word in ["top", "highest", "best", "revenue", "sales", "sum", "total"]):
-            return f"QUESTION = {question!r}\n{FALLBACK_TOP_CODE}"
-        return FALLBACK_PROFILE_CODE
+        return f"QUESTION = {question!r}\n{FALLBACK_SMART_CODE}"
 
 
 VARIABLE_VALUE_ANALYSIS_CODE = """
@@ -430,9 +428,154 @@ q = QUESTION.lower()
 def _name_l(col):
     return str(col).strip().lower().replace("_", " ").replace("-", " ")
 
+def _clean_text(value):
+    text = str(value).strip().lower().replace("_", " ").replace("-", " ")
+    for char in [",", ".", "?", "!", ":", ";", "(", ")", "[", "]", "{", "}", "/", "\\\\"]:
+        text = text.replace(char, " ")
+    return " ".join(text.split())
+
+def _singular(value):
+    text = _clean_text(value)
+    if text.endswith("ies"):
+        return f"{text[:-3]}y"
+    if text.endswith("s") and not text.endswith("ss"):
+        return text[:-1]
+    return text
+
+def _query_has(term):
+    term = _clean_text(term)
+    query = f" {_clean_text(q)} "
+    singular = _singular(term)
+    return f" {term} " in query or f" {singular} " in query
+
+def _query_tokens():
+    return _clean_text(q).split()
+
+def _requested_count(default=10):
+    words = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+    }
+    tokens = _query_tokens()
+    for token in tokens:
+        if token.isdigit():
+            value = int(token)
+            if 0 < value <= 250:
+                return value
+        if token in words:
+            return words[token]
+    return default
+
 def _has_any(col, words):
     name = _name_l(col)
-    return any(word in name for word in words)
+    return any(_clean_text(word) in name for word in words)
+
+def _column_alias_score(col, aliases):
+    name = _name_l(col)
+    score = 0
+    for alias in aliases:
+        cleaned = _clean_text(alias)
+        if _query_has(cleaned) and (cleaned in name or _singular(cleaned) in name):
+            score += 550
+    if ("product" in q or "products" in q) and name in ["item type", "item", "product", "product name", "category"]:
+        score += 650
+    if ("country" in q or "countries" in q) and name == "country":
+        score += 700
+    if ("region" in q or "regions" in q) and name == "region":
+        score += 700
+    if ("channel" in q or "channels" in q) and "channel" in name:
+        score += 650
+    return score
+
+def _best_column_from_question(include_numeric=True, include_text=True):
+    candidates = []
+    for col in df.columns:
+        is_numeric = pd.api.types.is_numeric_dtype(df[col])
+        if (is_numeric and not include_numeric) or ((not is_numeric) and not include_text):
+            continue
+        name = _name_l(col)
+        score = _column_alias_score(col, [name])
+        if name in _clean_text(q):
+            score += 500
+        for token in name.split():
+            if len(token) > 2 and _query_has(token):
+                score += 80
+        if score > 0:
+            candidates.append((score, str(col), col))
+    if not candidates:
+        return None
+    return sorted(candidates, reverse=True)[0][2]
+
+def _mentioned_text_col():
+    return _best_column_from_question(include_numeric=False, include_text=True)
+
+def _mentioned_numeric_col():
+    return _best_column_from_question(include_numeric=True, include_text=False)
+
+def _requested_metric():
+    explicit = _mentioned_numeric_col()
+    if explicit is not None and not _is_identifier_col(explicit) and not _is_time_col(explicit):
+        return explicit, _numeric_series(explicit)
+    if "profit" in q:
+        return _best_metric(include_words=["total profit", "profit", "margin"])
+    if "cost" in q:
+        return _best_metric(include_words=["total cost", "cost"])
+    if "price" in q:
+        return _best_metric(include_words=["unit price", "total price", "price"])
+    if "unit" in q or "units" in q or "quantity" in q:
+        return _best_metric(include_words=["units sold", "unit", "quantity", "qty"])
+    if "revenue" in q or "sales" in q or "amount" in q:
+        return _best_metric(include_words=["total revenue", "revenue", "sales", "amount"])
+    return _best_metric()
+
+def _requested_group_col():
+    explicit = _mentioned_text_col()
+    if explicit is not None:
+        return explicit
+    return _best_group_col()
+
+def _aggregation_kind():
+    tokens = _query_tokens()
+    clean = _clean_text(q)
+    if any(word in tokens for word in ["average", "avg", "mean"]):
+        return "mean"
+    if "how many" in clean or "number of" in clean or "count" in tokens:
+        return "count"
+    if any(word in tokens for word in ["minimum", "min", "lowest", "smallest", "cheapest"]):
+        return "min"
+    if any(word in tokens for word in ["maximum", "max", "highest", "largest", "top", "best"]):
+        return "sum"
+    return "sum"
+
+def _apply_mentioned_filters(frame):
+    filtered = frame
+    ignored_cols = []
+    group_col = _mentioned_text_col()
+    sort_col = _best_column_from_question(include_numeric=True, include_text=True)
+    if group_col is not None:
+        ignored_cols.append(_name_l(group_col))
+    if sort_col is not None:
+        ignored_cols.append(_name_l(sort_col))
+    for col in df.select_dtypes(exclude=np.number).columns:
+        if _name_l(col) in ignored_cols:
+            continue
+        values = df[col].dropna().astype(str).drop_duplicates()
+        matches = []
+        for value in values:
+            cleaned = _clean_text(value)
+            if len(cleaned) >= 3 and f" {cleaned} " in f" {_clean_text(q)} ":
+                matches.append(value)
+        if matches:
+            filtered = filtered[filtered[col].astype(str).isin(matches)]
+    return filtered
 
 def _total_label(col):
     text = str(col)
@@ -591,10 +734,11 @@ def _best_group_col():
         if _is_identifier_col(col) or _is_time_col(col):
             continue
         unique_count = int(df[col].nunique(dropna=True))
-        if unique_count < 2 or unique_count > max(60, len(df) * 0.75):
-            continue
         score = 0
-        if name in q:
+        score += _column_alias_score(col, [name])
+        if unique_count < 2 or (unique_count > max(60, len(df) * 0.75) and score < 500):
+            continue
+        if name in _clean_text(q):
             score += 300
         if "region" in name:
             score += 110
@@ -642,6 +786,165 @@ else:
         table = work.sort_values(metric, ascending=False).head(10)
         emit_insight(f"Top 10 rows by {metric}.")
         emit_table(f"Top rows by {metric}", table)
+""".strip()
+
+
+FALLBACK_LIST_CODE = GENERIC_ANALYSIS_HELPERS + "\n" + """
+
+target_col = _best_column_from_question(include_numeric=False, include_text=True)
+if target_col is None:
+    emit_insight("I could not identify which text column to list. Available columns are shown below.")
+    emit_table("Columns", pd.DataFrame({"Column": [str(col) for col in df.columns]}))
+else:
+    values = df[target_col].dropna().astype(str).drop_duplicates().sort_values().reset_index(drop=True)
+    table = pd.DataFrame({str(target_col): values})
+    emit_insight(f"Found {len(table):,} unique {target_col} values.")
+    emit_table(f"Unique {target_col}", table, max_rows=250)
+""".strip()
+
+
+FALLBACK_SORT_CODE = GENERIC_ANALYSIS_HELPERS + "\n" + """
+
+sort_col = _best_column_from_question(include_numeric=True, include_text=True)
+if sort_col is None:
+    emit_insight("I could not identify which column to sort by. Available columns are shown below.")
+    emit_table("Columns", pd.DataFrame({"Column": [str(col) for col in df.columns]}))
+else:
+    ascending = not any(word in q for word in ["descending", "desc", "highest", "largest", "decreasing"])
+    work = df.copy()
+    numeric_values = _numeric_series(sort_col)
+    if numeric_values.notna().mean() >= 0.65:
+        work["_sort_key"] = numeric_values
+        sorted_rows = work.sort_values("_sort_key", ascending=ascending, na_position="last")
+        sorted_rows = sorted_rows[[col for col in sorted_rows.columns if col != "_sort_key"]]
+    else:
+        sorted_rows = work.sort_values(sort_col, ascending=ascending, na_position="last")
+    direction = "ascending" if ascending else "descending"
+    emit_insight(f"Sorted rows by {sort_col} in {direction} order.")
+    emit_table(f"Rows sorted by {sort_col} ({direction})", sorted_rows, max_rows=100)
+""".strip()
+
+
+FALLBACK_SMART_CODE = GENERIC_ANALYSIS_HELPERS + "\n" + """
+
+clean_q = _clean_text(q)
+sort_intent = any(word in clean_q.split() for word in ["sort", "ascending", "descending", "asc", "desc"]) or "order by" in clean_q
+ranking_intent = any(word in clean_q.split() for word in ["top", "highest", "best", "largest", "lowest", "smallest", "cheapest"])
+total_intent = any(phrase in clean_q for phrase in ["total", "sum", "how much"])
+average_intent = any(word in clean_q.split() for word in ["average", "avg", "mean"])
+count_intent = "how many" in clean_q or any(word in clean_q.split() for word in ["count", "number"])
+by_intent = " by " in f" {clean_q} "
+display_list_intent = any(word in clean_q.split() for word in ["show", "display"]) and _mentioned_text_col() is not None and not any(word in clean_q.split() for word in ["revenue", "sales", "profit", "cost", "price", "total", "top", "highest", "lowest", "average", "avg", "mean", "sort"])
+list_intent = any(word in clean_q.split() for word in ["list", "unique", "distinct"]) or display_list_intent
+
+if sort_intent:
+    sort_col = _best_column_from_question(include_numeric=True, include_text=True)
+    if sort_col is None:
+        emit_insight("I could not identify which column to sort by. Available columns are shown below.")
+        emit_table("Columns", pd.DataFrame({"Column": [str(col) for col in df.columns]}))
+    else:
+        ascending = not any(word in clean_q.split() for word in ["descending", "desc", "highest", "largest", "decreasing"])
+        work = _apply_mentioned_filters(df.copy())
+        numeric_values = _numeric_series(sort_col).loc[work.index]
+        if numeric_values.notna().mean() >= 0.65:
+            work["_sort_key"] = numeric_values
+            sorted_rows = work.sort_values("_sort_key", ascending=ascending, na_position="last")
+            sorted_rows = sorted_rows[[col for col in sorted_rows.columns if col != "_sort_key"]]
+        else:
+            sorted_rows = work.sort_values(sort_col, ascending=ascending, na_position="last")
+        direction = "ascending" if ascending else "descending"
+        emit_insight(f"Sorted {len(sorted_rows):,} rows by {sort_col} in {direction} order.")
+        emit_table(f"Rows sorted by {sort_col} ({direction})", sorted_rows, max_rows=100)
+elif list_intent:
+    target_col = _mentioned_text_col() or _mentioned_numeric_col()
+    if target_col is None:
+        emit_insight("I could not identify which column to list. Available columns are shown below.")
+        emit_table("Columns", pd.DataFrame({"Column": [str(col) for col in df.columns]}))
+    else:
+        values = df[target_col].dropna().drop_duplicates().sort_values().reset_index(drop=True)
+        table = pd.DataFrame({str(target_col): values})
+        emit_insight(f"Found {len(table):,} unique {target_col} values.")
+        emit_table(f"Unique {target_col}", table, max_rows=250)
+elif count_intent and not total_intent and not average_intent:
+    group_col = _mentioned_text_col()
+    work = _apply_mentioned_filters(df.copy())
+    if group_col is not None:
+        table = work.groupby(group_col, dropna=False).size().reset_index(name="Count").sort_values("Count", ascending=False)
+        emit_insight(f"Count by {group_col}. Top value: {table.iloc[0][group_col]} with {int(table.iloc[0]['Count']):,} rows.")
+        emit_table(f"Count by {group_col}", table, max_rows=100)
+    else:
+        emit_insight(f"The filtered dataset contains {len(work):,} rows.")
+        emit_table("Row count", pd.DataFrame([{"Rows": int(len(work))}]))
+else:
+    metric, metric_values = _requested_metric()
+    explicit_group = _mentioned_text_col()
+    group_col = explicit_group if by_intent or explicit_group is not None else None
+    if ranking_intent and group_col is None:
+        group_col = _best_group_col()
+    work = _apply_mentioned_filters(df.copy())
+    if metric is None:
+        rows, cols = work.shape
+        missing_total = int(work.isna().sum().sum())
+        numeric_cols = list(work.select_dtypes(include=np.number).columns)
+        emit_insight(f"The dataset has {rows:,} matching rows and {cols:,} columns. It contains {missing_total:,} missing values. Numeric columns: {', '.join(map(str, numeric_cols[:12])) or 'none detected'}.")
+        emit_table("Sample rows", work.head(10))
+        if numeric_cols:
+            emit_table("Numeric summary", work[numeric_cols].describe().reset_index())
+    else:
+        values = metric_values.loc[work.index]
+        agg = _aggregation_kind()
+        ascending = any(word in clean_q.split() for word in ["lowest", "smallest", "cheapest", "min", "minimum"])
+        limit = _requested_count()
+        if group_col is not None and group_col in work.columns:
+            grouped_source = work[[group_col]].copy()
+            grouped_source[metric] = values
+            if agg == "mean" or average_intent:
+                table = grouped_source.groupby(group_col, dropna=False)[metric].mean().sort_values(ascending=ascending).head(limit).reset_index()
+                label = f"Average {metric}"
+                table = table.rename(columns={metric: label})
+            elif agg == "count":
+                table = grouped_source.groupby(group_col, dropna=False)[metric].count().sort_values(ascending=ascending).head(limit).reset_index()
+                label = "Count"
+                table = table.rename(columns={metric: label})
+            elif agg == "min":
+                table = grouped_source.groupby(group_col, dropna=False)[metric].min().sort_values(ascending=True).head(limit).reset_index()
+                label = f"Minimum {metric}"
+                table = table.rename(columns={metric: label})
+            else:
+                table = grouped_source.groupby(group_col, dropna=False)[metric].sum().sort_values(ascending=ascending).head(limit).reset_index()
+                label = _total_label(metric)
+                table = table.rename(columns={metric: label})
+            leader = table.iloc[0]
+            rank_word = "Lowest" if ascending else "Highest"
+            emit_insight(f"{rank_word} {label}: {leader[group_col]} with {leader[label]:,.2f}.")
+            emit_table(f"Top {group_col} by {label}", table, max_rows=limit)
+        elif total_intent or average_intent or count_intent:
+            if average_intent:
+                value = float(values.mean())
+                label = f"Average {metric}"
+            elif count_intent:
+                value = int(values.notna().sum())
+                label = f"Count of {metric}"
+            else:
+                value = float(values.sum())
+                label = _total_label(metric)
+            emit_insight(f"{label} is {value:,.2f}.")
+            emit_table(label, pd.DataFrame([{"Metric": str(metric), "Value": value}]))
+        elif ranking_intent:
+            sorted_rows = work.copy()
+            sorted_rows[metric] = values
+            sorted_rows = sorted_rows.sort_values(metric, ascending=ascending, na_position="last").head(limit)
+            direction = "lowest" if ascending else "highest"
+            emit_insight(f"Showing the {limit} {direction} rows by {metric}.")
+            emit_table(f"Top rows by {metric}", sorted_rows, max_rows=limit)
+        else:
+            rows, cols = work.shape
+            missing_total = int(work.isna().sum().sum())
+            numeric_cols = list(work.select_dtypes(include=np.number).columns)
+            emit_insight(f"The dataset has {rows:,} matching rows and {cols:,} columns. It contains {missing_total:,} missing values. Numeric columns: {', '.join(map(str, numeric_cols[:12])) or 'none detected'}.")
+            emit_table("Sample rows", work.head(10))
+            if numeric_cols:
+                emit_table("Numeric summary", work[numeric_cols].describe().reset_index())
 """.strip()
 
 
@@ -694,7 +997,60 @@ FALLBACK_CHART_CODE = GENERIC_ANALYSIS_HELPERS + "\n" + """
 
 date_col = _best_date_col()
 metric, metric_values = _best_metric()
-if metric is not None and date_col:
+requested = []
+if "revenue" in q or "sales" in q:
+    revenue_metric, revenue_values = _best_metric(include_words=["total revenue", "revenue", "sales"])
+    if revenue_metric is not None:
+        requested.append((revenue_metric, revenue_values))
+if "cost" in q:
+    cost_metric, cost_values = _best_metric(include_words=["total cost", "cost"])
+    if cost_metric is not None and all(_name_l(cost_metric) != _name_l(item[0]) for item in requested):
+        requested.append((cost_metric, cost_values))
+if "profit" in q or "margin" in q:
+    profit_metric, profit_values = _best_metric(include_words=["total profit", "profit", "margin"])
+    if profit_metric is not None and all(_name_l(profit_metric) != _name_l(item[0]) for item in requested):
+        requested.append((profit_metric, profit_values))
+
+if len(requested) >= 2:
+    if date_col:
+        temp = df[[date_col]].copy()
+        temp[date_col] = pd.to_datetime(temp[date_col], errors="coerce")
+        for column, values in requested:
+            temp[column] = values
+        temp = temp.dropna(subset=[date_col])
+        monthly = temp.set_index(date_col).resample("ME")[[column for column, values in requested]].sum().reset_index()
+        fig, ax = plt.subplots(figsize=(9, 4.8))
+        for column, values in requested:
+            ax.plot(monthly[date_col], monthly[column], marker="o", linewidth=2, label=str(column))
+        ax.set_title("Monthly totals")
+        ax.set_xlabel(str(date_col))
+        ax.set_ylabel("Total")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        fig.autofmt_xdate()
+        chart_path = OUTPUT_DIR / "monthly_metric_totals.png"
+        plt.tight_layout()
+        plt.savefig(chart_path, bbox_inches="tight")
+        emit_chart(chart_path, "Monthly revenue, cost, and profit")
+        emit_table("Monthly metric totals", monthly.tail(24))
+        totals = {str(column): float(values.sum()) for column, values in requested}
+        summary = "; ".join(f"total {name}: {value:,.2f}" for name, value in totals.items())
+        emit_insight(f"I plotted the requested metrics over time. Overall {summary}.")
+    else:
+        totals = pd.DataFrame([{"Metric": str(column), "Total": float(values.sum())} for column, values in requested])
+        fig, ax = plt.subplots(figsize=(8, 4.8))
+        ax.bar(totals["Metric"], totals["Total"])
+        ax.set_title("Metric totals")
+        ax.set_ylabel("Total")
+        ax.tick_params(axis="x", rotation=20)
+        chart_path = OUTPUT_DIR / "metric_totals.png"
+        plt.tight_layout()
+        plt.savefig(chart_path, bbox_inches="tight")
+        emit_chart(chart_path, "Revenue, cost, and profit totals")
+        emit_table("Metric totals", totals)
+        summary = "; ".join(f"{row['Metric']}: {row['Total']:,.2f}" for index, row in totals.iterrows())
+        emit_insight(f"I plotted the requested metric totals. {summary}.")
+elif metric is not None and date_col:
     temp = df[[date_col]].copy()
     temp[metric] = metric_values
     temp = temp.dropna(subset=[metric])

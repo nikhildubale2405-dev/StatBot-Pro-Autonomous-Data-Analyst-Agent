@@ -1,5 +1,6 @@
 import { BarChart3, Table2 } from "lucide-react";
-import { chartUrl } from "../lib/api.js";
+import { useEffect, useState } from "react";
+import { fetchChartBlob } from "../lib/api.js";
 
 export function TableResult({ table }) {
   return (
@@ -27,13 +28,36 @@ export function TableResult({ table }) {
 }
 
 export function ChartResult({ chart }) {
+  const [src, setSrc] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let objectUrl = "";
+    let cancelled = false;
+    setError("");
+    setSrc("");
+    fetchChartBlob(chart.url)
+      .then((blob) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setSrc(objectUrl);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err.message);
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [chart.url]);
+
   return (
     <div className="result-block chart-block">
       <div className="result-title">
         <BarChart3 size={16} />
         <span>{chart.title || "Chart"}</span>
       </div>
-      <img src={chartUrl(chart.url)} alt={chart.title || "Generated analysis chart"} />
+      {src ? <img src={src} alt={chart.title || "Generated analysis chart"} /> : <p className="chart-status">{error || "Loading chart..."}</p>}
     </div>
   );
 }

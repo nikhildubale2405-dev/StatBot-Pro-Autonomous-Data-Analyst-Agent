@@ -12,6 +12,8 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
       MAX_AGENT_RETRIES: ${MAX_AGENT_RETRIES:-2}
+      AUTH_SECRET_KEY: ${AUTH_SECRET_KEY:-change-this-to-a-long-random-secret}
+      AUTH_TOKEN_EXPIRE_MINUTES: ${AUTH_TOKEN_EXPIRE_MINUTES:-10080}
       SANDBOX_IMAGE: statbot-sandbox:latest
       SANDBOX_MODE: volume
       SANDBOX_UPLOADS_VOLUME: statbot_uploads

@@ -21,8 +21,11 @@ class Settings(BaseSettings):
     max_agent_retries: int = 2
     max_upload_bytes: int = 25 * 1024 * 1024
 
+    auth_secret_key: str = "change-me-in-production"
+    auth_token_expire_minutes: int = 60 * 24 * 7
+
     sandbox_image: str = "statbot-sandbox:latest"
-    sandbox_mode: str = Field(default="volume", description="Use 'volume' for Compose, 'bind' for local Docker paths, or 'local' for single-container hosts.")
+    sandbox_mode: str = Field(default="local", description="Use 'local' for local dev, 'volume' for Compose, or 'bind' for local Docker paths.")
     sandbox_local_runner_path: Path = Path("sandbox/runtime/runner.py")
     sandbox_uploads_volume: str = "statbot_uploads"
     sandbox_outputs_volume: str = "statbot_outputs"

@@ -15,6 +15,50 @@ class FileProfile(BaseModel):
     summary_statistics: dict[str, Any]
 
 
+class SignupRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    email: str = Field(min_length=3, max_length=255)
+    password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("name", "email", "password")
+    @classmethod
+    def strip_signup_text(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Value cannot be empty.")
+        return cleaned
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        if "@" not in cleaned or "." not in cleaned.rsplit("@", 1)[-1]:
+            raise ValueError("Enter a valid email address.")
+        return cleaned
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=255)
+    password: str = Field(min_length=1, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        return value.strip().lower()
+
+
+class UserResponse(BaseModel):
+    id: str
+    name: str
+    email: str
+
+
+class AuthResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
+
+
 class UploadResponse(BaseModel):
     session_id: str
     file_id: str

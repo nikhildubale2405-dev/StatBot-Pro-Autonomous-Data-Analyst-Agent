@@ -135,7 +135,9 @@ class LocalSandboxRunner:
         script_path.write_text(code, encoding="utf-8")
 
         runner_path = self._runner_path()
-        input_path = self.settings.upload_dir / stored_file_name
+        input_path = (self.settings.upload_dir / stored_file_name).resolve()
+        script_path = script_path.resolve()
+        run_dir = run_dir.resolve()
         started = time.monotonic()
         env = os.environ.copy()
         env.update(
@@ -200,8 +202,22 @@ class LocalSandboxRunner:
         raise SandboxUnavailableError(f"Local sandbox runner was not found: {configured}")
 
 
-def get_sandbox_runner() -> DockerSandboxRunner | LocalSandboxRunner:
+class AutoSandboxRunner:
+    def __init__(self) -> None:
+        self.docker_runner = DockerSandboxRunner()
+        self.local_runner = LocalSandboxRunner()
+
+    def run(self, stored_file_name: str, code: str) -> dict:
+        try:
+            return self.docker_runner.run(stored_file_name, code)
+        except SandboxUnavailableError:
+            return self.local_runner.run(stored_file_name, code)
+
+
+def get_sandbox_runner() -> DockerSandboxRunner | LocalSandboxRunner | AutoSandboxRunner:
     settings = get_settings()
     if settings.sandbox_mode == "local":
         return LocalSandboxRunner()
+    if settings.sandbox_mode == "auto":
+        return AutoSandboxRunner()
     return DockerSandboxRunner()
